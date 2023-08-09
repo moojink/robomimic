@@ -61,7 +61,7 @@ def get_exp_dir(config, auto_remove_exp_dir=False):
         else:
             ans = "y"
         if ans == "y":
-            print("REMOVING")
+            print(f"REMOVING DIRECTORY {base_output_dir}")
             shutil.rmtree(base_output_dir)
 
     # only make model directory if model saving is enabled

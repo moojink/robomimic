@@ -366,7 +366,7 @@ def main(args):
         config.experiment.rollout.horizon = 10
 
         # send output to a temporary directory
-        config.train.output_dir = "/tmp/tmp_trained_models"
+        config.train.output_dir = "./tmp/tmp_trained_models"
 
     # lock config to prevent further modifications and ensure missing keys raise errors
     config.lock()

@@ -123,3 +123,8 @@ venv.bak/
 
 # private macros
 macros_private.py
+
+# Other folders
+bc_trained_models/
+tmp/
+tests/
