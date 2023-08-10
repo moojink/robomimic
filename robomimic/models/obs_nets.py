@@ -25,6 +25,7 @@ from robomimic.models.base_nets import Module, Sequential, MLP, RNN_Base, ResNet
     FeatureAggregator
 from robomimic.models.obs_core import VisualCore, Randomizer
 from robomimic.models.transformers import PositionalEncoding, GPT_Backbone
+from robomimic.models.language_encoders import SentenceEncoder
 
 
 def obs_encoder_factory(
@@ -725,6 +726,9 @@ class RNN_MIMO_MLP(Module):
             rnn_kwargs=rnn_kwargs
         )
 
+        # sentence encoder
+        # self.sentence_encoder = SentenceEncoder('clip') # TODO: BRING THIS BACK!!!
+
     def get_rnn_init_state(self, batch_size, device):
         """
         Get a default RNN state (zeros)
@@ -786,6 +790,9 @@ class RNN_MIMO_MLP(Module):
                 assert inputs[obs_group][k].ndim - 2 == len(self.input_obs_group_shapes[obs_group][k])
 
         # use encoder to extract flat rnn inputs
+        if 'target_label' in inputs['obs']:
+            target_label_inputs = inputs['obs'].pop('target_label') # IMPORTANT TODO: DO SOMETHING WITH THE LANGUAGE INPUTS!!!
+        # target_label_embeddings = self.sentence_encoder(target_label_inputs) # IMPORTANT TODO: DO SOMETHING WITH THE LANGUAGE INPUTS!!!
         rnn_inputs = TensorUtils.time_distributed(inputs, self.nets["encoder"], inputs_as_kwargs=True)
         assert rnn_inputs.ndim == 3  # [B, T, D]
         if self.per_step:

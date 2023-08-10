@@ -527,12 +527,22 @@ class BC_RNN(BC):
             # This way, all actions are predicted "open-loop" after the first observation, based
             # on the rnn hidden state.
             n_steps = batch["actions"].shape[1]
+            if 'target_label' in batch['obs']:
+                target_label_inputs = batch['obs'].pop('target_label') # IMPORTANT TODO: DO SOMETHING WITH THE LANGUAGE INPUTS!!!
             obs_seq_start = TensorUtils.index_at_time(batch["obs"], ind=0)
             input_batch["obs"] = TensorUtils.unsqueeze_expand_at(obs_seq_start, size=n_steps, dim=1)
 
         # we move to device first before float conversion because image observation modalities will be uint8 -
         # this minimizes the amount of data transferred to GPU
-        return TensorUtils.to_float(TensorUtils.to_device(input_batch, self.device))
+        for k in input_batch['obs'].keys():
+            if k != 'target_label':
+                input_batch['obs'][k] = TensorUtils.to_float(TensorUtils.to_device(input_batch['obs'][k], self.device))
+        if input_batch['goal_obs'] is not None:
+            for k in input_batch['goal_obs'].keys():
+                if k != 'target_label':
+                    input_batch['goal_obs'][k] = TensorUtils.to_float(TensorUtils.to_device(input_batch['goal_obs'][k], self.device))
+        input_batch['actions'] = TensorUtils.to_float(TensorUtils.to_device(input_batch['actions'], self.device))
+        return input_batch
 
     def get_action(self, obs_dict, goal_dict=None):
         """

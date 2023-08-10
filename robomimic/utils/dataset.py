@@ -14,6 +14,94 @@ import robomimic.utils.tensor_utils as TensorUtils
 import robomimic.utils.obs_utils as ObsUtils
 import robomimic.utils.log_utils as LogUtils
 
+from upgm.utils.data_utils import get_actions_and_target_labels_dict, get_actions_dict, get_images_dict, get_mp4_filepaths, get_spartn_traj_hdf5_filepaths, get_target_labels_dict, get_traj_hdf5_filepaths, read_mp4
+
+
+class ExpertDatasetMemory(torch.utils.data.Dataset):
+    """
+    Expert demonstration dataset class that returns a T-length sequence of image-action pairs.
+    The full dataset is loaded into memory for faster sampling.
+    """
+    def __init__(self, mp4_filepaths, traj_hdf5_filepaths, img_size, sequence_length):
+        self.mp4_filepaths = mp4_filepaths
+        self.traj_hdf5_filepaths = traj_hdf5_filepaths
+        self.img_size = img_size
+        self.sequence_length = sequence_length
+        # Read everything from disk into memory.
+        self.images_dict = get_images_dict(self.mp4_filepaths, self.img_size)
+        self.actions_and_target_labels_dict = get_actions_and_target_labels_dict(self.traj_hdf5_filepaths)
+
+    def __len__(self):
+        return len(self.mp4_filepaths)
+
+    def _scale_actions(self, actions):
+        # Scale delta_pos and delta_euler actions between -1 and 1.
+        # Source of formula: https://stats.stackexchange.com/a/178629
+        # Assumes that delta_pos min/max are initially -0.05 and 0.05 (doesn't matter if this is incorrect by a small amount).
+        # Assumes that delta_euler min/max are initially -0.1 and 0.1 (doesn't matter if this is incorrect by a small amount).
+        min_delta_pos, max_delta_pos = -0.20, 0.20
+        min_delta_euler, max_delta_euler = -0.20, 0.20
+        actions[:,:3] = 2 * (actions[:,:3] - min_delta_pos) / (max_delta_pos - min_delta_pos) - 1
+        actions[:,3:6] = 2 * (actions[:,3:6] - min_delta_euler) / (max_delta_euler - min_delta_euler) - 1
+        return actions
+
+    def __getitem__(self, index):
+        # Fetch T-length sequence of images.
+        T = self.sequence_length
+        episode_length = self.images_dict[index].shape[0]
+        step_index = np.random.randint(0, episode_length - T + 1)
+        images = np.copy(self.images_dict[index][step_index:step_index+T]) # shape: (T, H, W, 3)
+        images = np.transpose(images, (0, 3, 1, 2)) # shape: (T, 3, H, W)
+        # Fetch action labels.
+        # Note: np.copy() is important here because otherwise, the `action = self._scale_actions(action)` line below
+        # will modify the action in-place and cause the actions to change (they would quickly expload over time).
+        actions = np.copy(self.actions_and_target_labels_dict[index]['action'][step_index:step_index+T]) # shape: (T, action_dim)
+        # Read a text annotation (e.g., 'small red cube') from disk.
+        target_label = self.actions_and_target_labels_dict[index]['target_label']
+        # Normalize the actions to range between -1 and 1 (roughly).
+        actions = self._scale_actions(actions)
+        return dict(
+            obs={'robot0_eye_in_hand_image': images, 'target_label': target_label,},
+            actions=actions,
+        )
+
+
+class AugmentedExpertedDataset(torch.utils.data.Dataset):
+    """
+    Apply data augmentation transformations to a Dataset.
+
+    Arguments:
+        dataset (Dataset): A Dataset that returns (sample, target).
+        aug_prob (float): Probability of applying the augmentations.
+    """
+    def __init__(self, dataset, aug_prob):
+        self.dataset = dataset
+        self.aug_prob = aug_prob
+        self.pad = transforms.Pad(12, padding_mode='edge') # padding each side by 12 by repeating boundary pixels as in DrQ
+        self.rc = transforms.RandomCrop(256, padding=0)
+
+    def transform(self, sampled_dict):
+        if random.uniform(0, 1) < self.aug_prob:
+            images = sampled_dict['obs']['robot0_eye_in_hand_image']
+            # Convert numpy arrays to (float) tensors, which are needed for the PyTorch data augmentation functions.
+            images = torch.tensor(images, dtype=torch.float32)
+            # import cv2
+            # cv2.imwrite('images0.png', np.transpose(images[0].numpy(), (1,2,0)))
+            images = self.pad(images)
+            # cv2.imwrite('images1.png', np.transpose(images[0].numpy(), (1,2,0)))
+            images = self.rc(images)
+            # cv2.imwrite('images2.png', np.transpose(images[0].numpy(), (1,2,0)))
+            # Convert back to (integer) numpy arrays.
+            images = images.numpy().astype(np.uint8)
+            sampled_dict['obs']['robot0_eye_in_hand_image'] = images
+        return sampled_dict
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        return self.transform(self.dataset.__getitem__(idx))
+
 
 class SequenceDataset(torch.utils.data.Dataset):
     def __init__(

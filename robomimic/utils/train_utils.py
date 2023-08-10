@@ -15,16 +15,54 @@ from copy import deepcopy
 from collections import OrderedDict
 
 import torch
+from torch.utils.data import ConcatDataset, Dataset, DataLoader, random_split, WeightedRandomSampler
 
 import robomimic
 import robomimic.utils.tensor_utils as TensorUtils
 import robomimic.utils.log_utils as LogUtils
 import robomimic.utils.file_utils as FileUtils
 
-from robomimic.utils.dataset import SequenceDataset
+from robomimic.utils.dataset import SequenceDataset, ExpertDatasetMemory, AugmentedExpertedDataset
 from robomimic.envs.env_base import EnvBase
 from robomimic.envs.wrappers import EnvWrapper
 from robomimic.algo import RolloutPolicy
+
+from upgm.utils.data_utils import get_actions_and_target_labels_dict, get_actions_dict, get_images_dict, get_mp4_filepaths, get_spartn_traj_hdf5_filepaths, get_target_labels_dict, get_traj_hdf5_filepaths, read_mp4
+
+def update_log_dir(log_dir):
+    """
+    Updates the log directory by appending a new experiment number.
+    Example: 'logs/bc/' -> 'logs/bc/1' if 'logs/bc/0' exists and is the only experiment completed thus far.
+    """
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    sub_dirs = [sub_dir for sub_dir in os.listdir(log_dir) if os.path.isdir(os.path.join(log_dir, sub_dir))]
+    if len(sub_dirs) == 0:
+        log_dir = os.path.join(log_dir, '0')
+    else:
+        sub_dirs_as_ints = [int(s) for s in sub_dirs]
+        last_sub_dir = max(sub_dirs_as_ints)
+        log_dir = os.path.join(log_dir, str(last_sub_dir + 1))
+    os.makedirs(log_dir)
+    return log_dir
+
+
+def get_norm_stats(dataset_dir):
+    traj_hdf5_filepaths = get_traj_hdf5_filepaths(dataset_dir) # list of paths to the `trajectory.h5` files containing action labels
+    all_action_data = []
+    for hdf5_filepath in traj_hdf5_filepaths:
+        with h5py.File(hdf5_filepath, 'r') as f:
+            # Read action labels.
+            action = np.concatenate((f['action']['cartesian_velocity'][:], np.expand_dims(f['action']['gripper_action'][:], axis=1)), axis=1) # shape: (num_steps_in_traj, action_dim)
+            action = action.astype('float32') # Cast from float64 to float32. The loss of precision is negligible for our purposes.
+        all_action_data.append(torch.from_numpy(action))
+    all_action_data = torch.concat(all_action_data)
+    # Normalize action data.
+    action_mean = all_action_data.mean(dim=0, keepdim=True)
+    action_std = all_action_data.std(dim=0, keepdim=True)
+    action_std = torch.clip(action_std, 1e-2, 10) # clipping
+    stats = {"action_mean": action_mean.numpy().squeeze(), "action_std": action_std.numpy().squeeze(),}
+    return stats
 
 
 def get_exp_dir(config, auto_remove_exp_dir=False):
@@ -47,82 +85,54 @@ def get_exp_dir(config, auto_remove_exp_dir=False):
     """
     # timestamp for directory names
     t_now = time.time()
-    time_str = datetime.datetime.fromtimestamp(t_now).strftime('%Y%m%d%H%M%S')
-
     # create directory for where to dump model parameters, tensorboard logs, and videos
     base_output_dir = os.path.expanduser(config.train.output_dir)
-    if not os.path.isabs(base_output_dir):
-        # relative paths are specified relative to robomimic module location
-        base_output_dir = os.path.join(robomimic.__path__[0], base_output_dir)
-    base_output_dir = os.path.join(base_output_dir, config.experiment.name)
-    if os.path.exists(base_output_dir):
-        if not auto_remove_exp_dir:
-            ans = input("WARNING: model directory ({}) already exists! \noverwrite? (y/n)\n".format(base_output_dir))
-        else:
-            ans = "y"
-        if ans == "y":
-            print(f"REMOVING DIRECTORY {base_output_dir}")
-            shutil.rmtree(base_output_dir)
-
+    base_output_dir = update_log_dir(base_output_dir)
     # only make model directory if model saving is enabled
     output_dir = None
     if config.experiment.save.enabled:
-        output_dir = os.path.join(base_output_dir, time_str, "models")
+        output_dir = os.path.join(base_output_dir, "models")
         os.makedirs(output_dir)
-
     # tensorboard directory
-    log_dir = os.path.join(base_output_dir, time_str, "logs")
+    log_dir = os.path.join(base_output_dir, "logs")
     os.makedirs(log_dir)
-
     # video directory
-    video_dir = os.path.join(base_output_dir, time_str, "videos")
+    video_dir = os.path.join(base_output_dir, "videos")
     os.makedirs(video_dir)
     return log_dir, output_dir, video_dir
 
 
-def load_data_for_training(config, obs_keys):
+def load_data_for_training(config, args, obs_keys):
     """
     Data loading at the start of an algorithm.
 
     Args:
         config (BaseConfig instance): config object
+        args: Command-line arguments passed into training script.
         obs_keys (list): list of observation modalities that are required for
             training (this will inform the dataloader on what modalities to load)
 
     Returns:
-        train_dataset (SequenceDataset instance): train dataset object
-        valid_dataset (SequenceDataset instance): valid dataset object (only if using validation)
+        train_dataset: train dataset object
+        val_dataset: validation dataset object
     """
-
-    # config can contain an attribute to filter on
-    train_filter_by_attribute = config.train.hdf5_filter_key
-    valid_filter_by_attribute = config.train.hdf5_validation_filter_key
-    if valid_filter_by_attribute is not None:
-        assert config.experiment.validate, "specified validation filter key {}, but config.experiment.validate is not set".format(valid_filter_by_attribute)
-
-    # load the dataset into memory
-    if config.experiment.validate:
-        assert not config.train.hdf5_normalize_obs, "no support for observation normalization with validation data yet"
-        assert (train_filter_by_attribute is not None) and (valid_filter_by_attribute is not None), \
-            "did not specify filter keys corresponding to train and valid split in dataset" \
-            " - please fill config.train.hdf5_filter_key and config.train.hdf5_validation_filter_key"
-        train_demo_keys = FileUtils.get_demos_for_filter_key(
-            hdf5_path=os.path.expanduser(config.train.data),
-            filter_key=train_filter_by_attribute,
-        )
-        valid_demo_keys = FileUtils.get_demos_for_filter_key(
-            hdf5_path=os.path.expanduser(config.train.data),
-            filter_key=valid_filter_by_attribute,
-        )
-        assert set(train_demo_keys).isdisjoint(set(valid_demo_keys)), "training demonstrations overlap with " \
-            "validation demonstrations!"
-        train_dataset = dataset_factory(config, obs_keys, filter_by_attribute=train_filter_by_attribute)
-        valid_dataset = dataset_factory(config, obs_keys, filter_by_attribute=valid_filter_by_attribute)
-    else:
-        train_dataset = dataset_factory(config, obs_keys, filter_by_attribute=train_filter_by_attribute)
-        valid_dataset = None
-
-    return train_dataset, valid_dataset
+    # Prepare training dataset.
+    mp4_filepaths = get_mp4_filepaths(data_dir=args.data_dir, cam_serial_num=args.cam_serial_num) # list of paths to the demonstration videos
+    traj_hdf5_filepaths = get_traj_hdf5_filepaths(data_dir=args.data_dir) # list of paths to the `trajectory.h5` files containing action labels
+    assert len(mp4_filepaths) == len(traj_hdf5_filepaths), f"Error: Found {len(mp4_filepaths)} videos and {len(traj_hdf5_filepaths)} trajectory.h5 files."
+    dataset_kwargs = dict(mp4_filepaths=mp4_filepaths, traj_hdf5_filepaths=traj_hdf5_filepaths, img_size=args.img_size, sequence_length=config.train.seq_length)
+    expert_dataset = ExpertDatasetMemory(**dataset_kwargs) # TODO: Add AugmentedExpertedDataset.
+    num_workers = 0
+    # Prepare data loaders.
+    percent_train = 0.9
+    n_data = len(expert_dataset)
+    n_train = int(percent_train * n_data)
+    n_val = n_data - n_train
+    print(f'Found {n_data} demonstrations in {args.data_dir}.')
+    print(f'Using {n_train} demonstrations ({percent_train*100}%) for the training set.')
+    print(f'Using {n_val} demonstrations ({100-percent_train*100}%) for the validation set.\n')
+    [train_dataset, val_dataset] = random_split(expert_dataset, [n_train, n_val], generator=torch.Generator().manual_seed(0)) # seed to get same split every time)
+    return train_dataset, val_dataset
 
 
 def dataset_factory(config, obs_keys, filter_by_attribute=None, dataset_path=None):
@@ -460,7 +470,7 @@ def should_save_from_rollout_logs(
     )
 
 
-def save_model(model, config, env_meta, shape_meta, ckpt_path, obs_normalization_stats=None):
+def save_model(model, config, shape_meta, ckpt_path, norm_stats=None):
     """
     Save model to a torch pth file.
 
@@ -469,35 +479,44 @@ def save_model(model, config, env_meta, shape_meta, ckpt_path, obs_normalization
 
         config (BaseConfig instance): config to save
 
-        env_meta (dict): env metadata for this training run
-
         shape_meta (dict): shape metdata for this training run
 
         ckpt_path (str): writes model checkpoint to this path
 
-        obs_normalization_stats (dict): optionally pass a dictionary for observation
-            normalization. This should map observation keys to dicts
-            with a "mean" and "std" of shape (1, ...) where ... is the default
-            shape for the observation.
+        norm_stats (dict or None): if provided, this should be a dict with keys 'action_mean' and 'action_std'
+            containing the aggregate mean and standard deviation of the actions in the dataset
     """
-    env_meta = deepcopy(env_meta)
     shape_meta = deepcopy(shape_meta)
-    params = dict(
-        model=model.serialize(),
-        config=config.dump(),
-        algo_name=config.algo_name,
-        env_metadata=env_meta,
-        shape_metadata=shape_meta,
-    )
-    if obs_normalization_stats is not None:
+    # # TODO: Remove commented out code below
+    # params = dict(
+    #     model=model.serialize(),
+    #     config=config.dump(),
+    #     algo_name=config.algo_name,
+    #     shape_metadata=shape_meta,
+    # )
+    # if norm_stats is not None:
+    #     assert config.train.hdf5_normalize_obs
+    #     norm_stats = deepcopy(norm_stats)
+    #     params["obs_normalization_stats"] = TensorUtils.to_list(norm_stats)
+    # torch.save(params, ckpt_path)
+
+
+    save_dict = {
+        'model_state_dict': model.nets.state_dict(),
+        'config': config.dump(),
+        'algo_name': config.algo_name,
+        'shape_metadata': shape_meta,
+    }
+    if norm_stats is not None:
         assert config.train.hdf5_normalize_obs
-        obs_normalization_stats = deepcopy(obs_normalization_stats)
-        params["obs_normalization_stats"] = TensorUtils.to_list(obs_normalization_stats)
-    torch.save(params, ckpt_path)
+        norm_stats = deepcopy(norm_stats)
+        save_dict['obs_normalization_stats'] = TensorUtils.to_list(norm_stats)
+    torch.save(save_dict, ckpt_path)
+
     print("save checkpoint to {}".format(ckpt_path))
 
 
-def run_epoch(model, data_loader, epoch, validate=False, num_steps=None, obs_normalization_stats=None):
+def run_epoch(model, data_loader, epoch, validate=False, num_steps=None, norm_stats=None):
     """
     Run an epoch of training or validation.
 
@@ -515,9 +534,8 @@ def run_epoch(model, data_loader, epoch, validate=False, num_steps=None, obs_nor
         num_steps (int): if provided, this epoch lasts for a fixed number of batches (gradient steps),
             otherwise the epoch is a complete pass through the training dataset
 
-        obs_normalization_stats (dict or None): if provided, this should map observation keys to dicts
-            with a "mean" and "std" of shape (1, ...) where ... is the default
-            shape for the observation.
+        norm_stats (dict or None): if provided, this should be a dict with keys 'action_mean' and 'action_std'
+            containing the aggregate mean and standard deviation of the actions in the dataset
 
     Returns:
         step_log_all (dict): dictionary of logged training metrics averaged across all batches
@@ -551,7 +569,8 @@ def run_epoch(model, data_loader, epoch, validate=False, num_steps=None, obs_nor
         # process batch for training
         t = time.time()
         input_batch = model.process_batch_for_training(batch)
-        input_batch = model.postprocess_batch_for_training(input_batch, obs_normalization_stats=obs_normalization_stats)
+        input_batch['obs']['robot0_eye_in_hand_image'] = input_batch['obs']['robot0_eye_in_hand_image'] / 255.0 - 0.5 # normalize images to [-0.5, 0.5]
+        # TODO: Use or get rid of norm_stats
         timing_stats["Process_Batch"].append(time.time() - t)
 
         # forward and backward pass
