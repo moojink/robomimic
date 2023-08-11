@@ -727,7 +727,7 @@ class RNN_MIMO_MLP(Module):
         )
 
         # sentence encoder
-        # self.sentence_encoder = SentenceEncoder('clip') # TODO: BRING THIS BACK!!!
+        self.sentence_encoder = SentenceEncoder('clip')
 
     def get_rnn_init_state(self, batch_size, device):
         """

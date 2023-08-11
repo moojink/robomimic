@@ -463,18 +463,16 @@ class RolloutPolicy(object):
     """
     Wraps @Algo object to make it easy to run policies in a rollout loop.
     """
-    def __init__(self, policy, obs_normalization_stats=None):
+    def __init__(self, policy, norm_stats=None):
         """
         Args:
             policy (Algo instance): @Algo object to wrap to prepare for rollouts
 
-            obs_normalization_stats (dict): optionally pass a dictionary for observation
-                normalization. This should map observation keys to dicts
-                with a "mean" and "std" of shape (1, ...) where ... is the default
-                shape for the observation.
+            norm_stats (dict or None): if provided, this should be a dict with keys 'action_mean' and 'action_std'
+                containing the aggregate mean and standard deviation of the actions in the dataset
         """
         self.policy = policy
-        self.obs_normalization_stats = obs_normalization_stats
+        self.norm_stats = norm_stats
 
     def start_episode(self):
         """
@@ -491,8 +489,6 @@ class RolloutPolicy(object):
             ob (dict): single observation dictionary from environment (no batch dimension, 
                 and np.array values for each key)
         """
-        if self.obs_normalization_stats is not None:
-            ob = ObsUtils.normalize_obs(ob, obs_normalization_stats=self.obs_normalization_stats)
         ob = TensorUtils.to_tensor(ob)
         ob = TensorUtils.to_batch(ob)
         ob = TensorUtils.to_device(ob, self.policy.device)

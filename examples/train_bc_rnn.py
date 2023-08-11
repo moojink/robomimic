@@ -272,7 +272,7 @@ if __name__ == "__main__":
                         help="Whether to use SPARTN data augmentations on the training set.")
     parser.add_argument("--use_ram", type=str_to_bool, default=False,
                         help="Whether to load all training data into memory instead of reading from disk (for small datasets).")
-    parser.add_argument("--checkpoint_epoch_offset", type=str_to_bool, default=False,
+    parser.add_argument("--checkpoint_epoch_offset", type=str_to_bool, default=True,
                         help="(Only applicable when loading checkpoint) If True, the starting epoch number is 0. Else, we start where the previous checkpoint finished.")
     parser.add_argument("--encoder_features_dim", type=int, default=512,
                         help="Output size of image encoder.")

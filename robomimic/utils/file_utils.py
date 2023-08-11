@@ -379,12 +379,13 @@ def policy_from_checkpoint(device=None, ckpt_path=None, ckpt_dict=None, verbose=
     shape_meta = ckpt_dict["shape_metadata"]
 
     # maybe restore observation normalization stats
-    obs_normalization_stats = ckpt_dict.get("obs_normalization_stats", None)
-    if obs_normalization_stats is not None:
+    norm_stats = ckpt_dict.get("norm_stats", None)
+    if norm_stats is not None:
         assert config.train.hdf5_normalize_obs
-        for m in obs_normalization_stats:
-            for k in obs_normalization_stats[m]:
-                obs_normalization_stats[m][k] = np.array(obs_normalization_stats[m][k])
+        pass # TODO: Do something with norm_stats or get rid of it
+        # for m in obs_normalization_stats:
+        #     for k in obs_normalization_stats[m]:
+        #         obs_normalization_stats[m][k] = np.array(obs_normalization_stats[m][k])
 
     if device is None:
         # get torch device
@@ -398,9 +399,9 @@ def policy_from_checkpoint(device=None, ckpt_path=None, ckpt_dict=None, verbose=
         ac_dim=shape_meta["ac_dim"],
         device=device,
     )
-    model.deserialize(ckpt_dict["model"])
+    model.nets.load_state_dict(ckpt_dict['model_state_dict'])
     model.set_eval()
-    model = RolloutPolicy(model, obs_normalization_stats=obs_normalization_stats)
+    model = RolloutPolicy(model, norm_stats=norm_stats)
     if verbose:
         print("============= Loaded Policy =============")
         print(model)

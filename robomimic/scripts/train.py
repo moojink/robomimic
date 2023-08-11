@@ -87,7 +87,14 @@ def train(config, args, device):
         ac_dim=shape_meta["ac_dim"],
         device=device,
     )
-    
+
+    # Load checkpoint if applicable.
+    if args.checkpoint_epoch != '':
+        ckpt_path = os.path.join(args.checkpoint_dir, 'models', f'model_epoch_{args.checkpoint_epoch}.pth')
+        policy, ckpt_dict = FileUtils.policy_from_checkpoint(ckpt_path=ckpt_path, device=device, verbose=False)
+        model = policy.policy
+        print(f'Loaded checkpoint from {ckpt_path}')
+
     # save the config as a json file
     with open(os.path.join(log_dir, '..', 'config.json'), 'w') as outfile:
         json.dump(config, outfile, indent=4)
@@ -130,7 +137,14 @@ def train(config, args, device):
     train_num_steps = config.experiment.epoch_every_n_steps
     valid_num_steps = config.experiment.validation_epoch_every_n_steps
 
-    for epoch in range(1, config.train.num_epochs + 1): # epoch numbers start at 1
+    # Offset start and end epoch numbers if args.checkpoint_epoch_offset==True so that we start where we
+    # left off in the previous training run.
+    epoch_start = 1 # epoch numbers start at 1
+    epoch_end = config.train.num_epochs
+    if args.checkpoint_epoch != '' and args.checkpoint_epoch_offset==True:
+        epoch_start = int(args.checkpoint_epoch) + 1
+        epoch_end += int(args.checkpoint_epoch)
+    for epoch in range(epoch_start, epoch_end + 1):
         step_log = TrainUtils.run_epoch(
             model=model,
             data_loader=train_loader,
