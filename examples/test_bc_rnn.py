@@ -205,6 +205,11 @@ def run_trained_agent(args):
 
     # restore policy
     policy, ckpt_dict = FileUtils.policy_from_checkpoint(ckpt_path=ckpt_path, device=device, verbose=True)
+    # Print some stats about the model, like number of parameters.
+    num_total_params = sum(param.numel() for param in policy.policy.nets.parameters())
+    num_trainable_params = sum(param.numel() for param in policy.policy.nets.parameters() if param.requires_grad)
+    print(f'# parameters (total): {num_total_params}')
+    print(f'# parameters (trainable): {num_trainable_params}')
 
     # read rollout settings
     rollout_num_episodes = args.n_rollouts
